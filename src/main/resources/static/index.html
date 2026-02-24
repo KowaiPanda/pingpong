@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Spring Boot Ping Pong</title>
+    <style>
+        body { background-color: #222; color: white; display: flex; flex-direction: column; align-items: center; font-family: sans-serif; }
+        canvas { background-color: #000; border: 2px solid #fff; margin-top: 20px; }
+        .controls { margin-top: 10px; }
+        button { padding: 10px 20px; font-size: 16px; cursor: pointer; }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/sockjs-client/1.5.1/sockjs.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/stomp.js/2.3.3/stomp.min.js"></script>
+</head>
+<body>
+
+    <h1>Spring Boot Multiplayer Ping Pong</h1>
+    <div class="controls">
+        <label>Select Player: </label>
+        <select id="playerSelect">
+            <option value="player1">Player 1 (Host/Left)</option>
+            <option value="player2">Player 2 (Client/Right)</option>
+        </select>
+        <button onclick="connect()">Join Game</button>
+    </div>
+    
+    <canvas id="gameCanvas" width="800" height="400"></canvas>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        
+        const paddleHeight = 100;
+        const paddleWidth = 10;
+        let playerRole = "";
+        let stompClient = null;
+
+        // Positions
+        let leftPaddleY = 150;
+        let rightPaddleY = 150;
+        let ballX = 400, ballY = 200;
+        
+        // Physics (Only used by Player 1)
+        let ballSpeedX = 4, ballSpeedY = 4;
+
+        function draw() {
+            ctx.fillStyle = 'black';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // Paddles
+            ctx.fillStyle = 'white';
+            ctx.fillRect(0, leftPaddleY, paddleWidth, paddleHeight); 
+            ctx.fillRect(canvas.width - paddleWidth, rightPaddleY, paddleWidth, paddleHeight); 
+
+            // Ball
+            ctx.beginPath();
+            ctx.arc(ballX, ballY, 8, 0, Math.PI * 2);
+            ctx.fillStyle = 'red';
+            ctx.fill();
+            ctx.closePath();
+        }
+
+        function update() {
+            // --- HOST LOGIC (Player 1) ---
+            if(playerRole === 'player1') {
+                // 1. Calculate Physics
+                ballX += ballSpeedX;
+                ballY += ballSpeedY;
+
+                // Wall Collision
+                if (ballY + 4 > canvas.height || ballY - 4 < 0) {
+                    ballSpeedY = -ballSpeedY;
+                }
+
+                // Paddle Collision
+                if (ballX < paddleWidth && ballY > leftPaddleY && ballY < leftPaddleY + paddleHeight) {
+                    ballSpeedX = -ballSpeedX;
+                    ballSpeedX = ballSpeedX > 0 ? ballSpeedX + 0.5 : ballSpeedX - 0.5;
+                }
+                if (ballX > canvas.width - paddleWidth && ballY > rightPaddleY && ballY < rightPaddleY + paddleHeight) {
+                    ballSpeedX = -ballSpeedX;
+                }
+
+                // Reset
+                if (ballX < 0 || ballX > canvas.width) {
+                    ballX = 400; ballY = 200; ballSpeedX = 4; ballSpeedY = 4;
+                }
+
+                // 2. Broadcast Ball Position to Player 2
+                sendBallData(ballX, ballY);
+            }
+
+            // Draw current state (Both players do this)
+            draw();
+            requestAnimationFrame(update);
+        }
+
+        function connect() {
+            playerRole = document.getElementById("playerSelect").value;
+            const socket = new SockJS('/pingpong-websocket');
+            stompClient = Stomp.over(socket);
+            // Disable debug logs to prevent console spam
+            stompClient.debug = null; 
+
+            stompClient.connect({}, function (frame) {
+                console.log('Connected: ' + frame);
+                document.querySelector('.controls').style.display = 'none';
+                
+                stompClient.subscribe('/topic/game', function (message) {
+                    const data = JSON.parse(message.body);
+
+                    // HANDLE PADDLE MOVEMENT
+                    if (data.type === 'PADDLE') {
+                        if (data.player === "player1") leftPaddleY = data.paddleY;
+                        if (data.player === "player2") rightPaddleY = data.paddleY;
+                    }
+
+                    // HANDLE BALL MOVEMENT (Only Player 2 listens to this)
+                    if (data.type === 'BALL' && playerRole === 'player2') {
+                        ballX = data.ballX;
+                        ballY = data.ballY;
+                    }
+                });
+                
+                update();
+            });
+        }
+
+        function sendPaddleMove(y) {
+            if (stompClient && stompClient.connected) {
+                stompClient.send("/app/move", {}, JSON.stringify({
+                    'type': 'PADDLE',
+                    'player': playerRole,
+                    'paddleY': y
+                }));
+            }
+        }
+
+        function sendBallData(x, y) {
+            if (stompClient && stompClient.connected) {
+                stompClient.send("/app/move", {}, JSON.stringify({
+                    'type': 'BALL',
+                    'ballX': x,
+                    'ballY': y
+                }));
+            }
+        }
+
+        canvas.addEventListener('mousemove', function(e) {
+            const rect = canvas.getBoundingClientRect();
+            let newY = e.clientY - rect.top - (paddleHeight / 2);
+
+            if(newY < 0) newY = 0;
+            if(newY > canvas.height - paddleHeight) newY = canvas.height - paddleHeight;
+
+            // Local update (immediate feedback)
+            if (playerRole === 'player1') leftPaddleY = newY;
+            else rightPaddleY = newY;
+
+            // Send to server
+            sendPaddleMove(newY);
+        });
+
+    </script>
+</body>
+</html>
